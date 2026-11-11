@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#101d22" />
+  <meta name="description" content="Epoq: a living planet shared by many kinds of minds. Watch generated societies grow, meet and change their world." />
+  <title>Epoq · A Meqanic game</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="preload" as="image" href="title/history-rising.jpg" />
+  <link rel="stylesheet" crossorigin href="./assets/index-CCRbpbbW.css">
+  <meta name="robots" content="noindex, nofollow">
+  <style>#lock [hidden]{display:none!important}#lock .title-note:empty{display:none}</style>
+</head>
+<body>
+  <section class="title-screen" id="lock" aria-labelledby="lock-epoq">
+    <div class="title-art" style="background-image:url(title/history-rising.jpg)" role="img" aria-label="A world at night, its history rising from its peoples like a constellation."></div>
+    <div class="title-veil"></div>
+    <header class="title-head">
+      <h1 id="lock-epoq"><span class="sr-only">EPOQ</span><svg class="title-mark" viewBox="0 0 43.8 11" aria-hidden="true" focusable="false"><rect x="0" y="0" width="2" height="9"/><rect x="0" y="0" width="9" height="2"/><rect x="0" y="3.5" width="9" height="2"/><rect x="0" y="7" width="9" height="2"/><rect x="11.6" y="0" width="2" height="9"/><rect x="11.6" y="0" width="9" height="2"/><rect x="11.6" y="3.5" width="9" height="2"/><rect x="18.6" y="0" width="2" height="5.5"/><rect x="23.2" y="0" width="9" height="2"/><rect x="23.2" y="7" width="9" height="2"/><rect x="23.2" y="0" width="2" height="9"/><rect x="30.2" y="0" width="2" height="9"/><rect x="34.8" y="0" width="9" height="2"/><rect x="34.8" y="7" width="9" height="2"/><rect x="34.8" y="0" width="2" height="9"/><rect x="41.8" y="0" width="2" height="9"/><rect x="38.3" y="9" width="2" height="2"/></svg></h1>
+      <i class="title-rule" aria-hidden="true"></i>
+      <p class="title-byline">A Meqanic game</p>
+    </header>
+    <nav class="title-menu" aria-label="Unlock">
+      <form class="title-name" id="lock-form" hidden>
+        <label for="lock-input">Passphrase</label>
+        <input id="lock-input" maxlength="200" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" />
+        <button type="submit" class="primary" id="lock-open">Open</button>
+      </form>
+      <p class="title-note" id="lock-note" role="status" aria-live="polite"></p>
+      <noscript><p class="title-note">Epoq needs JavaScript to generate and explore a world.</p></noscript>
+    </nav>
+  </section>
+  <div id="app"></div>
+  <noscript>Epoq needs JavaScript to generate and explore a world.</noscript>
+  <script nomodule>document.getElementById('lock-note').textContent = 'This browser cannot open Epoq. Try a current browser.';</script>
+  <script type="module">
+// The cryptography of a locked build, in one place: lock.mjs inlines this file into the unlock page, and the tests import
+// it in Node, so the code that opens the game in a browser is the code the tests run. Web Crypto and DecompressionStream
+// only: both are in current browsers (in a secure context) and in Node as globals.
+//
+// A locked file is: "EPOQLOCK", version (1 byte), PBKDF2 iterations (uint32, big-endian), salt (16 bytes), nonce (12 bytes),
+// then AES-256-GCM ciphertext with its 16-byte tag. Those first 41 bytes are the GCM additional data, so they cannot be
+// altered without the tag failing. The plaintext is a gzip of: manifest length (uint32), manifest JSON, the files' bytes.
+
+const MAGIC = 'EPOQLOCK';
+const VERSION = 1;
+const HEAD_BYTES = 41;
+
+/** One passphrase however a phone types it: case, spacing and Unicode forms do not matter. */
+const normalizePassphrase = s => String(s ?? '').normalize('NFKC').toLowerCase().trim().split(/\s+/).filter(Boolean).join(' ');
+
+function readLocked(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (b.length < HEAD_BYTES + 16 || String.fromCharCode(...b.subarray(0, 8)) !== MAGIC || b[8] !== VERSION) throw new Error('not a locked Epoq build');
+  return { head: b.subarray(0, HEAD_BYTES), iterations: new DataView(b.buffer, b.byteOffset + 9, 4).getUint32(0), salt: b.subarray(13, 29), iv: b.subarray(29, 41), sealed: b.subarray(HEAD_BYTES) };
+}
+
+/** The raw AES key, so a device can keep it and skip the slow step next time. */
+async function deriveKey(passphrase, salt, iterations) {
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(normalizePassphrase(passphrase)), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, material, 256));
+}
+
+/** Rejects with name "WrongPassphrase" when GCM authentication fails, which is what a wrong key does. */
+async function openLocked(locked, rawKey) {
+  const key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+  let zipped;
+  try { zipped = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: locked.iv, additionalData: locked.head, tagLength: 128 }, key, locked.sealed); }
+  catch { const e = new Error('wrong passphrase'); e.name = 'WrongPassphrase'; throw e; }
+  const all = new Uint8Array(await new Response(new Blob([zipped]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  const n = new DataView(all.buffer, all.byteOffset, 4).getUint32(0), manifest = JSON.parse(new TextDecoder().decode(all.subarray(4, 4 + n)));
+  let at = 4 + n;
+  const files = manifest.files.map(f => ({ path: f.path, type: f.type, bytes: all.subarray(at, at += f.size) }));
+  if (at !== all.length) throw new Error('locked build is damaged');
+  return { entry: manifest.entry, files, links: manifest.links };
+}
+
+/**
+ * `urlOf(path)` gives a URL for a file of the opened build, made by `makeUrl(file, bytes)` (a blob URL in the page). A file
+ * that names another (the main script names the two workers) has those names replaced first by the other's URL, at the
+ * byte spans lock.mjs found, so `new URL(name, import.meta.url)` becomes `new URL("blob:…", import.meta.url)`.
+ */
+function linker(opened, makeUrl) {
+  const byPath = new Map(opened.files.map(f => [f.path, f])), made = new Map(), making = new Set(), enc = new TextEncoder();
+  const urlOf = path => {
+    if (made.has(path)) return made.get(path);
+    const f = byPath.get(path);
+    if (!f || making.has(path)) throw new Error(`cannot link ${path}`);
+    making.add(path);
+    const spans = opened.links.filter(l => l.file === path).sort((a, b) => a.at - b.at), parts = [];
+    let from = 0;
+    for (const l of spans) { parts.push(f.bytes.subarray(from, l.at), enc.encode(JSON.stringify(urlOf(l.to)))); from = l.end; }
+    parts.push(f.bytes.subarray(from));
+    const bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    parts.reduce((o, p) => (bytes.set(p, o), o + p.length), 0);
+    const url = makeUrl(f, bytes);
+    made.set(path, url);
+    return url;
+  };
+  return urlOf;
+}
+
+const toBase64 = bytes => btoa(String.fromCharCode(...bytes));
+const fromBase64 = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
+const PAYLOAD = "assets/locked-7f741e1769f0.bin", KEEP = 'epoq:unlock';
+const $ = id => document.getElementById(id), lock = $('lock'), form = $('lock-form'), input = $('lock-input'), open = $('lock-open');
+const say = text => { $('lock-note').textContent = text; };
+const mark = name => { try { performance.mark(`epoq-lock:${name}`); } catch { /* the marks only time the unlock for the tests */ } };
+const failure = (name, error) => Object.assign(new Error(String(error?.message ?? error)), { name });
+const MESSAGES = { WrongPassphrase: 'That passphrase is wrong.', Download: 'The game could not be downloaded. Check the connection and try again.', Start: 'The game could not start. Reload the page to try again.' };
+let fetching;
+// Fetched as the page opens, so it arrives while the player types.
+const payload = () => fetching ??= fetch(PAYLOAD).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); }).then(readLocked).catch(e => { fetching = undefined; throw failure('Download', e); });
+// What this device keeps after an unlock: the passphrase, and the key it gave for this build with that build's salt. The
+// key opens the same build again without the slow step; the passphrase opens a new build after a redeploy without asking.
+const kept = () => { try { const v = JSON.parse(localStorage.getItem(KEEP) ?? 'null'); return v && typeof v.p === 'string' ? v : undefined; } catch { return undefined; } };
+const keep = (p, salt, key) => { try { localStorage.setItem(KEEP, JSON.stringify({ p, s: toBase64(salt), k: toBase64(key) })); } catch { /* storage unavailable: asked again next visit */ } };
+const forget = () => { try { localStorage.removeItem(KEEP); } catch { /* nothing was kept */ } };
+const ask = (text = '') => { mark('asked'); say(text); form.hidden = false; open.disabled = false; input.focus(); };
+
+async function start(opened) {
+  try {
+    const urlOf = linker(opened, (f, bytes) => URL.createObjectURL(new Blob([bytes], { type: f.type }))), app = $('app');
+    // The game's own title paints over this one; this one goes once the game has put something on the page.
+    new MutationObserver((_, o) => { if (app.firstChild) { o.disconnect(); lock.remove(); } }).observe(app, { childList: true });
+    await import(urlOf(opened.entry));
+    mark('started');
+  } catch (e) { throw failure('Start', e); }
+}
+
+async function unlock(passphrase, saved) {
+  const locked = await payload(), salt = toBase64(locked.salt);
+  let key = saved?.s === salt && typeof saved.k === 'string' ? fromBase64(saved.k) : undefined, opened;
+  try { opened = key && await openLocked(locked, key); } catch { opened = undefined; }
+  if (!opened) { mark('derive'); key = await deriveKey(passphrase, locked.salt, locked.iterations); mark('key'); opened = await openLocked(locked, key); }
+  mark('opened');
+  keep(normalizePassphrase(passphrase), locked.salt, key);
+  await start(opened);
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  const passphrase = normalizePassphrase(input.value);
+  if (!passphrase || open.disabled) return;
+  open.disabled = true; say('Opening…');
+  try { await unlock(passphrase); }
+  catch (e) { ask(MESSAGES[e?.name] ?? MESSAGES.Start); if (e?.name === 'WrongPassphrase') input.select(); }
+});
+
+if (!globalThis.isSecureContext || !globalThis.crypto?.subtle) say('This copy of Epoq opens only over https or on localhost.');
+else if (typeof DecompressionStream !== 'function') say('This browser cannot open Epoq. Try a current browser.');
+else {
+  const saved = kept();
+  if (!saved) { payload().catch(() => {}); ask(); }
+  else {
+    say('Opening…');
+    unlock(saved.p, saved).catch(e => { if (e?.name === 'WrongPassphrase') { forget(); ask(); } else ask(MESSAGES[e?.name] ?? MESSAGES.Start); });
+  }
+}
+  </script>
+</body>
+</html>
