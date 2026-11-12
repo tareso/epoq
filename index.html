@@ -8,7 +8,7 @@
   <title>Epoq · A Meqanic game</title>
   <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
   <link rel="preload" as="image" href="title/history-rising.jpg" />
-  <link rel="stylesheet" crossorigin href="./assets/index-CCRbpbbW.css">
+  <link rel="stylesheet" crossorigin href="./assets/index-BbAXOuYj.css">
   <meta name="robots" content="noindex, nofollow">
   <style>#lock [hidden]{display:none!important}#lock .title-note:empty{display:none}</style>
 </head>
@@ -103,7 +103,7 @@ function linker(opened, makeUrl) {
 
 const toBase64 = bytes => btoa(String.fromCharCode(...bytes));
 const fromBase64 = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
-const PAYLOAD = "assets/locked-7f741e1769f0.bin", KEEP = 'epoq:unlock';
+const PAYLOAD = "assets/locked-193cd3bfff5c.bin", KEEP = 'epoq:unlock';
 const $ = id => document.getElementById(id), lock = $('lock'), form = $('lock-form'), input = $('lock-input'), open = $('lock-open');
 const say = text => { $('lock-note').textContent = text; };
 const mark = name => { try { performance.mark(`epoq-lock:${name}`); } catch { /* the marks only time the unlock for the tests */ } };
