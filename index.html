@@ -35,6 +35,10 @@
   <noscript>Epoq needs JavaScript to generate and explore a world.</noscript>
   <script nomodule>document.getElementById('lock-note').textContent = 'This browser cannot open Epoq. Try a current browser.';</script>
   <script type="module">
+// A link can carry the passphrase in its fragment (#k=…, tools/deploy/README.md). Whatever happens next, the fragment leaves
+// the address first, keeping ?seed=, so the game and the links it makes never see it.
+const LINK = location.hash;
+if (fragmentValue(LINK, 'k') !== undefined) history.replaceState(history.state, '', location.pathname + location.search);
 // The cryptography of a locked build, in one place: lock.mjs inlines this file into the unlock page, and the tests import
 // it in Node, so the code that opens the game in a browser is the code the tests run. Web Crypto and DecompressionStream
 // only: both are in current browsers (in a secure context) and in Node as globals.
@@ -49,6 +53,29 @@ const HEAD_BYTES = 41;
 
 /** One passphrase however a phone types it: case, spacing and Unicode forms do not matter. */
 const normalizePassphrase = s => String(s ?? '').normalize('NFKC').toLowerCase().trim().split(/\s+/).filter(Boolean).join(' ');
+
+// Both are function declarations, not consts: the unlock page calls fragmentValue above the inlined core, to take the
+// passphrase out of the address before anything else runs.
+
+/** The raw, still percent-encoded value of `name` among a fragment's `&`-separated parameters; undefined when it has none. */
+function fragmentValue(hash, name) {
+  for (const part of String(hash ?? '').replace(/^#/, '').split('&')) {
+    const at = part.indexOf('=');
+    if ((at < 0 ? part : part.slice(0, at)) === name) return at < 0 ? '' : part.slice(at + 1);
+  }
+  return undefined;
+}
+
+/**
+ * The passphrase a link carries in its fragment, `#k=maple-river-otter-lantern`, normalized; '' when it carries none or a
+ * malformed one. A `-` or a `+` is a space, and anything else is percent-encoded, a literal `-` as %2D (passphraseLink in
+ * link.mjs writes it). Browsers never send the fragment to the server or in a Referer.
+ */
+function passphraseFromFragment(hash) {
+  const raw = fragmentValue(hash, 'k');
+  if (!raw) return '';
+  try { return normalizePassphrase(decodeURIComponent(raw.replace(/[-+]/g, ' '))); } catch { return ''; }
+}
 
 function readLocked(bytes) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -103,20 +130,28 @@ function linker(opened, makeUrl) {
 
 const toBase64 = bytes => btoa(String.fromCharCode(...bytes));
 const fromBase64 = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
-const PAYLOAD = "assets/locked-49ee4b3d48b4.bin", KEEP = 'epoq:unlock';
+const PAYLOAD = "assets/locked-3ffe4857bf3c.bin", KEEP = 'epoq:unlock', HOLD = 'epoq:unlock-link', RETRY_MS = 1500;
 const $ = id => document.getElementById(id), lock = $('lock'), form = $('lock-form'), input = $('lock-input'), open = $('lock-open');
 const say = text => { $('lock-note').textContent = text; };
 const mark = name => { try { performance.mark(`epoq-lock:${name}`); } catch { /* the marks only time the unlock for the tests */ } };
 const failure = (name, error) => Object.assign(new Error(String(error?.message ?? error)), { name });
-const MESSAGES = { WrongPassphrase: 'That passphrase is wrong.', Download: 'The game could not be downloaded. Check the connection and try again.', Start: 'The game could not start. Reload the page to try again.' };
+const MESSAGES = { WrongPassphrase: 'That passphrase is wrong.', WrongLink: 'This link no longer opens Epoq. Type the passphrase.', Download: 'The game could not be downloaded. Check the connection and try again.', Start: 'The game could not start. Reload the page to try again.' };
 let fetching;
-// Fetched as the page opens, so it arrives while the player types.
-const payload = () => fetching ??= fetch(PAYLOAD).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); }).then(readLocked).catch(e => { fetching = undefined; throw failure('Download', e); });
+const download = () => fetch(PAYLOAD).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); });
+// Fetched as the page opens, so it arrives while the player types. A failed download is tried once more after a pause
+// before the player is told: a crowded network often drops a request.
+const payload = () => fetching ??= download().catch(() => new Promise(r => setTimeout(r, RETRY_MS)).then(download)).then(readLocked).catch(e => { fetching = undefined; throw failure('Download', e); });
 // What this device keeps after an unlock: the passphrase, and the key it gave for this build with that build's salt. The
 // key opens the same build again without the slow step; the passphrase opens a new build after a redeploy without asking.
 const kept = () => { try { const v = JSON.parse(localStorage.getItem(KEEP) ?? 'null'); return v && typeof v.p === 'string' ? v : undefined; } catch { return undefined; } };
 const keep = (p, salt, key) => { try { localStorage.setItem(KEEP, JSON.stringify({ p, s: toBase64(salt), k: toBase64(key) })); } catch { /* storage unavailable: asked again next visit */ } };
 const forget = () => { try { localStorage.removeItem(KEEP); } catch { /* nothing was kept */ } };
+// A link's passphrase that has neither opened this build nor been found wrong is held for this tab only, so a failed
+// download does not strand the player: a reload, or Open with the field empty, tries it again.
+let pending;
+const held = () => { try { return normalizePassphrase(sessionStorage.getItem(HOLD) ?? '') || undefined; } catch { return undefined; } };
+const hold = p => { pending = p; try { sessionStorage.setItem(HOLD, p); } catch { /* held in memory only */ } };
+const release = () => { pending = undefined; try { sessionStorage.removeItem(HOLD); } catch { /* nothing was held */ } };
 const ask = (text = '') => { mark('asked'); say(text); form.hidden = false; open.disabled = false; input.focus(); };
 
 async function start(opened) {
@@ -136,23 +171,50 @@ async function unlock(passphrase, saved) {
   if (!opened) { mark('derive'); key = await deriveKey(passphrase, locked.salt, locked.iterations); mark('key'); opened = await openLocked(locked, key); }
   mark('opened');
   keep(normalizePassphrase(passphrase), locked.salt, key);
+  release();
   await start(opened);
+}
+
+// The link's passphrase first, with the kept key only if it was kept for that passphrase. If the link's no longer opens this
+// build, the one this device kept may. A passphrase is kept only once it opens the build.
+async function fromLink(linked, saved) {
+  hold(linked);
+  for (const p of saved && saved.p !== linked ? [linked, saved.p] : [linked]) {
+    try { return await unlock(p, saved?.p === p ? saved : undefined); }
+    catch (e) { if (e?.name !== 'WrongPassphrase') return ask(MESSAGES[e?.name] ?? MESSAGES.Start); }
+    if (p === linked) release();
+  }
+  if (saved) forget();
+  ask(MESSAGES.WrongLink);
 }
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
   const passphrase = normalizePassphrase(input.value);
-  if (!passphrase || open.disabled) return;
+  if (open.disabled || !(passphrase || pending)) return;
   open.disabled = true; say('Opening…');
+  // A typed passphrase comes first; with the field empty, the link's passphrase held after a failed download.
+  if (!passphrase) return fromLink(pending, kept());
   try { await unlock(passphrase); }
   catch (e) { ask(MESSAGES[e?.name] ?? MESSAGES.Start); if (e?.name === 'WrongPassphrase') input.select(); }
+});
+
+// A link opened again in this tab changes only the fragment, and the page does not load again: the fragment leaves the
+// address here too, game or no game, and the link opens the game if the page is waiting for a passphrase.
+addEventListener('hashchange', () => {
+  if (fragmentValue(location.hash, 'k') === undefined) return;
+  const linked = passphraseFromFragment(location.hash);
+  history.replaceState(history.state, '', location.pathname + location.search);
+  if (linked && !form.hidden && !open.disabled) { open.disabled = true; say('Opening…'); fromLink(linked, kept()); }
 });
 
 if (!globalThis.isSecureContext || !globalThis.crypto?.subtle) say('This copy of Epoq opens only over https or on localhost.');
 else if (typeof DecompressionStream !== 'function') say('This browser cannot open Epoq. Try a current browser.');
 else {
-  const saved = kept();
-  if (!saved) { payload().catch(() => {}); ask(); }
+  // A link's passphrase, or one this tab holds from a link whose download failed.
+  const saved = kept(), linked = passphraseFromFragment(LINK) || held();
+  if (linked) { say('Opening…'); fromLink(linked, saved); }
+  else if (!saved) { payload().catch(() => {}); ask(); }
   else {
     say('Opening…');
     unlock(saved.p, saved).catch(e => { if (e?.name === 'WrongPassphrase') { forget(); ask(); } else ask(MESSAGES[e?.name] ?? MESSAGES.Start); });
